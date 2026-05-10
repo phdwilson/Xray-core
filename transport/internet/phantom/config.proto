@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package xray.transport.internet.phantom;
+option csharp_namespace = "Xray.Transport.Internet.Phantom";
+option go_package = "github.com/xtls/xray-core/transport/internet/phantom";
+option java_package = "com.xray.transport.internet.phantom";
+option java_multiple_files = true;
+
+// Config is the Phantom security protocol configuration.
+// Phantom is a simplified, easy-to-use fork of REALITY that supports
+// password-based authentication (no manual key generation required) and
+// optional traffic padding to resist DPI fingerprinting.
+message Config {
+  // Show debug logs when true.
+  bool show = 1;
+
+  // --- Server-side fields ---
+
+  // Dest is the fallback destination address (e.g. "example.com:443").
+  string dest = 2;
+
+  // Type is the network type of the fallback destination ("tcp" or "unix").
+  string type = 3;
+
+  // Xver is the PROXY protocol version to use when connecting to dest (0, 1, or 2).
+  uint64 xver = 4;
+
+  // ServerNames is the list of allowed SNI values on the server.
+  repeated string server_names = 5;
+
+  // PrivateKey is the X25519 private key used for server authentication.
+  // If empty and Password is set, derived automatically from Password.
+  bytes private_key = 6;
+
+  // ShortIds are the allowed short IDs used in the client hello.
+  repeated bytes short_ids = 10;
+
+  // --- Client-side fields ---
+
+  // Fingerprint is the uTLS fingerprint to use (e.g. "chrome", "firefox").
+  // Defaults to "chrome" when empty.
+  string fingerprint = 21;
+
+  // ServerName is the SNI to present to the server.
+  string server_name = 22;
+
+  // PublicKey is the X25519 public key of the server.
+  // If empty and Password is set, derived automatically from Password.
+  bytes public_key = 23;
+
+  // ShortId is the short ID expected by the server.
+  bytes short_id = 24;
+
+  // --- Shared / simplified fields ---
+
+  // Password is used to derive the X25519 key pair automatically.
+  // Set the same password on both server and client for zero-config key
+  // exchange. If PrivateKey/PublicKey are also set they take precedence.
+  string password = 30;
+
+  // Padding enables random traffic padding to resist DPI traffic-size
+  // fingerprinting. Recommended to enable for maximum obfuscation.
+  bool padding = 31;
+
+  // MasterKeyLog is a path to write TLS master secrets for debugging.
+  string master_key_log = 32;
+}

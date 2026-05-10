@@ -40,6 +40,7 @@ import (
 	"github.com/xtls/xray-core/transport/internet/hysteria"
 	"github.com/xtls/xray-core/transport/internet/hysteria/congestion/bbr"
 	"github.com/xtls/xray-core/transport/internet/kcp"
+	"github.com/xtls/xray-core/transport/internet/phantom"
 	"github.com/xtls/xray-core/transport/internet/reality"
 	"github.com/xtls/xray-core/transport/internet/splithttp"
 	"github.com/xtls/xray-core/transport/internet/tcp"
@@ -985,6 +986,147 @@ func (c *REALITYConfig) Build() (proto.Message, error) {
 		u.RawQuery = q.Encode()
 		config.SpiderX = u.String()
 		config.ServerName = c.ServerName
+	}
+	return config, nil
+}
+
+// ---------------------------------------------------------------------------
+// PhantomConfig — Phantom protocol (simplified REALITY fork)
+// ---------------------------------------------------------------------------
+
+// PhantomConfig holds the JSON configuration for the Phantom security protocol.
+//
+// Server-side example:
+//
+//	{
+//	  "dest": "www.example.com:443",
+//	  "serverNames": ["www.example.com"],
+//	  "password": "my-shared-secret"
+//	}
+//
+// Client-side example:
+//
+//	{
+//	  "serverName": "www.example.com",
+//	  "password": "my-shared-secret",
+//	  "fingerprint": "chrome",
+//	  "padding": true
+//	}
+type PhantomConfig struct {
+	// Server-side fields
+	MasterKeyLog string   `json:"masterKeyLog"`
+	Show         bool     `json:"show"`
+	Dest         string   `json:"dest"`
+	Type         string   `json:"type"`
+	Xver         uint64   `json:"xver"`
+	ServerNames  []string `json:"serverNames"`
+	PrivateKey   string   `json:"privateKey"`
+	ShortIds     []string `json:"shortIds"`
+
+	// Client-side fields
+	Fingerprint string `json:"fingerprint"`
+	ServerName  string `json:"serverName"`
+	PublicKey   string `json:"publicKey"`
+	ShortId     string `json:"shortId"`
+
+	// Shared fields
+	// Password is the shared secret from which the X25519 key pair is
+	// automatically derived.  When set, PrivateKey/PublicKey may be omitted.
+	Password string `json:"password"`
+	// Padding enables random traffic padding to resist DPI size fingerprinting.
+	Padding bool `json:"padding"`
+}
+
+// Build converts a PhantomConfig into a proto.Message (*phantom.Config).
+func (c *PhantomConfig) Build() (proto.Message, error) {
+	config := new(phantom.Config)
+	config.MasterKeyLog = c.MasterKeyLog
+	config.Show = c.Show
+	config.Password = c.Password
+	config.Padding = c.Padding
+
+	var err error
+
+	// --- Server-side ---
+	if c.Dest != "" {
+		if c.Type == "" {
+			// Infer the network type from the destination string.
+			switch {
+			case strings.HasPrefix(c.Dest, "@"), strings.HasPrefix(c.Dest, "/"):
+				c.Type = "unix"
+			default:
+				if _, err = strconv.Atoi(c.Dest); err == nil {
+					c.Dest = "localhost:" + c.Dest
+				}
+				if _, _, err = net.SplitHostPort(c.Dest); err == nil {
+					c.Type = "tcp"
+				}
+			}
+		}
+		if c.Type == "" {
+			return nil, errors.New(`phantom: cannot infer network type from "dest": `, c.Dest)
+		}
+		if c.Xver > 2 {
+			return nil, errors.New(`phantom: invalid PROXY protocol version, "xver" only accepts 0, 1, 2`)
+		}
+		if len(c.ServerNames) == 0 {
+			return nil, errors.New(`phantom: "serverNames" must not be empty on the server side`)
+		}
+		// Private key: either explicit or derived from password at runtime.
+		if c.PrivateKey != "" {
+			if config.PrivateKey, err = base64.RawURLEncoding.DecodeString(c.PrivateKey); err != nil || len(config.PrivateKey) != 32 {
+				return nil, errors.New(`phantom: invalid "privateKey": `, c.PrivateKey)
+			}
+		} else if c.Password == "" {
+			return nil, errors.New(`phantom: either "privateKey" or "password" must be set on the server side`)
+		}
+		// Short IDs
+		config.ShortIds = make([][]byte, len(c.ShortIds))
+		for i, s := range c.ShortIds {
+			if len(s) > 16 {
+				return nil, errors.New(`phantom: too long "shortIds[`, i, `]": `, s)
+			}
+			config.ShortIds[i] = make([]byte, 8)
+			if _, err = hex.Decode(config.ShortIds[i], []byte(s)); err != nil {
+				return nil, errors.New(`phantom: invalid "shortIds[`, i, `]": `, s)
+			}
+		}
+		config.Dest = c.Dest
+		config.Type = c.Type
+		config.Xver = c.Xver
+		config.ServerNames = c.ServerNames
+	} else {
+		// --- Client-side ---
+		config.Fingerprint = strings.ToLower(c.Fingerprint)
+		// Default fingerprint
+		if config.Fingerprint == "" {
+			config.Fingerprint = "chrome"
+		}
+		if tls.GetFingerprint(config.Fingerprint) == nil {
+			return nil, errors.New(`phantom: unknown "fingerprint": `, config.Fingerprint)
+		}
+		if c.ServerName == "" {
+			return nil, errors.New(`phantom: "serverName" must be set on the client side`)
+		}
+		config.ServerName = c.ServerName
+		// Public key: either explicit or derived from password at runtime.
+		if c.PublicKey != "" {
+			if config.PublicKey, err = base64.RawURLEncoding.DecodeString(c.PublicKey); err != nil || len(config.PublicKey) != 32 {
+				return nil, errors.New(`phantom: invalid "publicKey": `, c.PublicKey)
+			}
+		} else if c.Password == "" {
+			return nil, errors.New(`phantom: either "publicKey" or "password" must be set on the client side`)
+		}
+		// Short ID (optional, defaults to empty = no short ID)
+		if len(c.ShortId) > 16 {
+			return nil, errors.New(`phantom: too long "shortId": `, c.ShortId)
+		}
+		config.ShortId = make([]byte, 8)
+		if c.ShortId != "" {
+			if _, err = hex.Decode(config.ShortId, []byte(c.ShortId)); err != nil {
+				return nil, errors.New(`phantom: invalid "shortId": `, c.ShortId)
+			}
+		}
 	}
 	return config, nil
 }
@@ -1942,6 +2084,7 @@ type StreamConfig struct {
 	FinalMask           *FinalMask         `json:"finalmask"`
 	TLSSettings         *TLSConfig         `json:"tlsSettings"`
 	REALITYSettings     *REALITYConfig     `json:"realitySettings"`
+	PhantomSettings     *PhantomConfig     `json:"phantomSettings"`
 	RAWSettings         *TCPConfig         `json:"rawSettings"`
 	TCPSettings         *TCPConfig         `json:"tcpSettings"`
 	XHTTPSettings       *SplitHTTPConfig   `json:"xhttpSettings"`
@@ -1981,6 +2124,20 @@ func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
 		ts, err := tlsSettings.Build()
 		if err != nil {
 			return nil, errors.New("Failed to build TLS config.").Base(err)
+		}
+		tm := serial.ToTypedMessage(ts)
+		config.SecuritySettings = append(config.SecuritySettings, tm)
+		config.SecurityType = tm.Type
+	case "phantom":
+		if config.ProtocolName != "tcp" {
+			return nil, errors.New("Phantom only supports RAW (TCP) transport for now.")
+		}
+		if c.PhantomSettings == nil {
+			c.PhantomSettings = &PhantomConfig{}
+		}
+		ts, err := c.PhantomSettings.Build()
+		if err != nil {
+			return nil, errors.New("Failed to build Phantom config.").Base(err)
 		}
 		tm := serial.ToTypedMessage(ts)
 		config.SecuritySettings = append(config.SecuritySettings, tm)
