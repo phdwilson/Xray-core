@@ -60,7 +60,22 @@ type Config struct {
 	// fingerprinting. Recommended to enable for maximum obfuscation.
 	Padding bool `protobuf:"varint,31,opt,name=padding,proto3" json:"padding,omitempty"`
 	// MasterKeyLog is a path to write TLS master secrets for debugging.
-	MasterKeyLog  string `protobuf:"bytes,32,opt,name=master_key_log,json=masterKeyLog,proto3" json:"master_key_log,omitempty"`
+	MasterKeyLog string `protobuf:"bytes,32,opt,name=master_key_log,json=masterKeyLog,proto3" json:"master_key_log,omitempty"`
+	// SpiderX is the spider starting path with optional query parameters that
+	// control spider behaviour (same syntax as REALITY's spiderX):
+	//
+	//	?p=<min>-<max>   cookie padding length
+	//	?c=<min>-<max>   concurrent sub-requests
+	//	?t=<min>-<max>   page load repeats
+	//	?i=<min>-<max>   interval between repeats (ms)
+	//	?r=<min>-<max>   return-delay after verification failure (ms)
+	//
+	// Defaults to "/" when empty.
+	SpiderX string `protobuf:"bytes,33,opt,name=spider_x,json=spiderX,proto3" json:"spider_x,omitempty"`
+	// SpiderY stores the parsed integer bounds from SpiderX at index positions:
+	//
+	//	[0,1]  padding, [2,3] concurrency, [4,5] times, [6,7] interval, [8,9] return
+	SpiderY       []int64 `protobuf:"varint,34,rep,packed,name=spider_y,json=spiderY,proto3" json:"spider_y,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -193,11 +208,25 @@ func (x *Config) GetMasterKeyLog() string {
 	return ""
 }
 
+func (x *Config) GetSpiderX() string {
+	if x != nil {
+		return x.SpiderX
+	}
+	return ""
+}
+
+func (x *Config) GetSpiderY() []int64 {
+	if x != nil {
+		return x.SpiderY
+	}
+	return nil
+}
+
 var File_transport_internet_phantom_config_proto protoreflect.FileDescriptor
 
 const file_transport_internet_phantom_config_proto_rawDesc = "" +
 	"\n" +
-	"'transport/internet/phantom/config.proto\x12\x1fxray.transport.internet.phantom\"\x92\x03\n" +
+	"'transport/internet/phantom/config.proto\x12\x1fxray.transport.internet.phantom\"\xc8\x03\n" +
 	"\x06Config\x12\x12\n" +
 	"\x04show\x18\x01 \x01(\bR\x04show\x12\x12\n" +
 	"\x04dest\x18\x02 \x01(\tR\x04dest\x12\x12\n" +
@@ -216,7 +245,9 @@ const file_transport_internet_phantom_config_proto_rawDesc = "" +
 	"\bshort_id\x18\x18 \x01(\fR\ashortId\x12\x1a\n" +
 	"\bpassword\x18\x1e \x01(\tR\bpassword\x12\x18\n" +
 	"\apadding\x18\x1f \x01(\bR\apadding\x12$\n" +
-	"\x0emaster_key_log\x18  \x01(\tR\fmasterKeyLogB\x7f\n" +
+	"\x0emaster_key_log\x18  \x01(\tR\fmasterKeyLog\x12\x19\n" +
+	"\bspider_x\x18! \x01(\tR\aspiderX\x12\x19\n" +
+	"\bspider_y\x18\" \x03(\x03R\aspiderYB\x7f\n" +
 	"#com.xray.transport.internet.phantomP\x01Z4github.com/xtls/xray-core/transport/internet/phantom\xaa\x02\x1fXray.Transport.Internet.Phantomb\x06proto3"
 
 var (

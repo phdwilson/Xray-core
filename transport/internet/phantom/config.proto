@@ -64,4 +64,18 @@ message Config {
 
   // MasterKeyLog is a path to write TLS master secrets for debugging.
   string master_key_log = 32;
+
+  // SpiderX is the spider starting path with optional query parameters that
+  // control spider behaviour (same syntax as REALITY's spiderX):
+  //   ?p=<min>-<max>   cookie padding length
+  //   ?c=<min>-<max>   concurrent sub-requests
+  //   ?t=<min>-<max>   page load repeats
+  //   ?i=<min>-<max>   interval between repeats (ms)
+  //   ?r=<min>-<max>   return-delay after verification failure (ms)
+  // Defaults to "/" when empty.
+  string spider_x = 33;
+
+  // SpiderY stores the parsed integer bounds from SpiderX at index positions:
+  //   [0,1]  padding, [2,3] concurrency, [4,5] times, [6,7] interval, [8,9] return
+  repeated int64 spider_y = 34;
 }

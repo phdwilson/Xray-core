@@ -1033,8 +1033,16 @@ type PhantomConfig struct {
 	// Password is the shared secret from which the X25519 key pair is
 	// automatically derived.  When set, PrivateKey/PublicKey may be omitted.
 	Password string `json:"password"`
-	// Padding enables random traffic padding to resist DPI size fingerprinting.
+	// Padding enables per-handshake session-ID byte randomisation.
 	Padding bool `json:"padding"`
+	// SpiderX is the starting path for the verification-failure spider.
+	// Supports the same query parameters as REALITY's spiderX:
+	//   ?p=min-max   cookie padding bytes
+	//   ?c=min-max   concurrent sub-requests
+	//   ?t=min-max   page visit repeats
+	//   ?i=min-max   interval between repeats (ms)
+	//   ?r=min-max   return delay on failure (ms)
+	SpiderX string `json:"spiderX"`
 }
 
 // Build converts a PhantomConfig into a proto.Message (*phantom.Config).
@@ -1044,6 +1052,38 @@ func (c *PhantomConfig) Build() (proto.Message, error) {
 	config.Show = c.Show
 	config.Password = c.Password
 	config.Padding = c.Padding
+
+	// Parse SpiderX (same format as REALITY's spiderX).
+	spiderX := c.SpiderX
+	if spiderX == "" {
+		spiderX = "/"
+	}
+	if spiderX[0] != '/' {
+		return nil, errors.New(`phantom: invalid "spiderX" (must start with /): `, spiderX)
+	}
+	config.SpiderY = make([]int64, 10)
+	u, _ := url.Parse(spiderX)
+	q := u.Query()
+	parseSpiderParam := func(param string, index int) {
+		if q.Get(param) != "" {
+			s := strings.Split(q.Get(param), "-")
+			if len(s) == 1 {
+				config.SpiderY[index], _ = strconv.ParseInt(s[0], 10, 64)
+				config.SpiderY[index+1], _ = strconv.ParseInt(s[0], 10, 64)
+			} else {
+				config.SpiderY[index], _ = strconv.ParseInt(s[0], 10, 64)
+				config.SpiderY[index+1], _ = strconv.ParseInt(s[1], 10, 64)
+			}
+		}
+		q.Del(param)
+	}
+	parseSpiderParam("p", 0) // cookie padding length range
+	parseSpiderParam("c", 2) // concurrency range
+	parseSpiderParam("t", 4) // page visit times range
+	parseSpiderParam("i", 6) // interval between visits range (ms)
+	parseSpiderParam("r", 8) // return delay range (ms)
+	u.RawQuery = q.Encode()
+	config.SpiderX = u.String()
 
 	var err error
 

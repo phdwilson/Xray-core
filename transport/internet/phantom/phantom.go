@@ -1,11 +1,11 @@
 // Package phantom provides a simplified, easy-to-use TLS-impersonation security
-// layer that is a fork of the REALITY protocol.  Key improvements over REALITY:
+// layer forked from the REALITY protocol.  Compared with REALITY, Phantom adds:
 //
-//   - Password-based key derivation: a simple shared password is all that is
-//     needed—no manual X25519 key-pair generation or distribution.
-//   - Optional traffic padding: random-length zero-padding can be injected to
-//     resist DPI traffic-size fingerprinting.
-//   - Sensible defaults: the uTLS fingerprint defaults to "chrome".
+//   - Password-based X25519 key derivation — no manual key generation needed.
+//   - Full browser-spider on verification failure — multi-page, concurrent,
+//     with realistic cookie padding and timing (same quality as REALITY's spider).
+//   - Optional per-handshake session-ID padding to increase DPI resistance.
+//   - A default uTLS fingerprint of "chrome" so clients need minimal config.
 package phantom
 
 import (
@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -32,17 +33,15 @@ import (
 	"github.com/xtls/xray-core/common/crypto"
 	"github.com/xtls/xray-core/common/errors"
 	xnet "github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/utils"
 	"github.com/xtls/xray-core/core"
 	itls "github.com/xtls/xray-core/transport/internet/tls"
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/net/http2"
 )
 
-// phantomHKDFLabel must match the label used by the xtls/reality server-side
-// library.  The server hardcodes "REALITY" in its HKDF derivation, so the
-// client must use the same value for authentication to succeed.
-// Protocol differentiation from REALITY is achieved via password-based key
-// derivation and the optional traffic-padding feature, not via the HKDF label.
+// phantomHKDFLabel must match the label hardcoded in the xtls/reality server
+// library so that the server can authenticate the client session ID.
 const phantomHKDFLabel = "REALITY"
 
 // Conn wraps a goreality.Conn and exposes the HandshakeAddress helper.
@@ -50,8 +49,7 @@ type Conn struct {
 	*goreality.Conn
 }
 
-// HandshakeAddress returns the SNI carried in the completed TLS handshake, or
-// nil if the handshake has not completed or contains no server name.
+// HandshakeAddress returns the SNI from the completed TLS handshake.
 func (c *Conn) HandshakeAddress() xnet.Address {
 	if err := c.Handshake(); err != nil {
 		return nil
@@ -94,10 +92,9 @@ func (c *UConn) HandshakeAddress() xnet.Address {
 	return xnet.ParseAddress(state.ServerName)
 }
 
-// VerifyPeerCertificate validates the server's Phantom-specific certificate
-// auth tag.  If the tag is absent or invalid it falls back to normal PKIX
-// certificate verification so that the connection is indistinguishable from a
-// real TLS client connecting to the fallback destination.
+// VerifyPeerCertificate validates the Phantom HMAC certificate tag.  If the
+// tag is absent or invalid, the method falls back to standard PKIX certificate
+// verification so the connection is indistinguishable from a normal browser.
 func (c *UConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 	if c.Config.Show {
 		fmt.Printf("PHANTOM localAddr: %v\tVerifyPeerCertificate\n", c.LocalAddr())
@@ -105,7 +102,9 @@ func (c *UConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x50
 	p, _ := reflect.TypeOf(c.Conn).Elem().FieldByName("peerCertificates")
 	certs := *(*([]*x509.Certificate))(unsafe.Pointer(uintptr(unsafe.Pointer(c.Conn)) + p.Offset))
 
-	// Check for a Phantom/REALITY-style HMAC-authenticated Ed25519 certificate.
+	// Phantom/REALITY style: server embeds HMAC-SHA512(authKey, ed25519Pub) as
+	// the certificate signature, so the certificate is unforgeable without the
+	// shared key derived during this TLS session.
 	if pub, ok := certs[0].PublicKey.(ed25519.PublicKey); ok {
 		h := hmac.New(sha512.New, c.AuthKey)
 		h.Write(pub)
@@ -115,7 +114,7 @@ func (c *UConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x50
 		}
 	}
 
-	// Fall back to standard TLS certificate verification.
+	// Fall back to standard PKIX certificate verification.
 	opts := x509.VerifyOptions{
 		DNSName:       c.ServerName,
 		Intermediates: x509.NewCertPool(),
@@ -129,12 +128,8 @@ func (c *UConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x50
 	return nil
 }
 
-// UClient performs the Phantom client-side handshake over conn and returns the
+// UClient performs the Phantom client-side handshake and returns the
 // authenticated connection.
-//
-//   - config carries the Phantom settings (password or explicit keys).
-//   - ctx is used for deadline / cancellation of the TLS handshake.
-//   - dest is the remote endpoint; its address is used as the default SNI.
 func UClient(conn xnet.Conn, config *Config, ctx context.Context, dest xnet.Destination) (xnet.Conn, error) {
 	localAddr := conn.LocalAddr().String()
 
@@ -167,7 +162,7 @@ func UClient(conn xnet.Conn, config *Config, ctx context.Context, dest xnet.Dest
 		uConn.BuildHandshakeState()
 		hello := uConn.HandshakeState.Hello
 
-		// Allocate a fresh session ID and stamp the Xray version + timestamp.
+		// Build the session ID: Xray version (3 B) | reserved (1 B) | timestamp (4 B) | short-ID (8 B) | ...
 		hello.SessionId = make([]byte, 32)
 		copy(hello.Raw[39:], hello.SessionId)
 		hello.SessionId[0] = core.Version_x
@@ -181,7 +176,8 @@ func UClient(conn xnet.Conn, config *Config, ctx context.Context, dest xnet.Dest
 			fmt.Printf("PHANTOM localAddr: %v\thello.SessionId[:16]: %v\n", localAddr, hello.SessionId[:16])
 		}
 
-		// Optional padding: randomise the reserved byte to introduce variance.
+		// Session-ID padding: randomise the reserved byte to add per-connection
+		// variance that confuses size-based DPI classifiers.
 		if config.Padding {
 			var rb [1]byte
 			if _, err := rand.Read(rb[:]); err == nil {
@@ -199,15 +195,13 @@ func UClient(conn xnet.Conn, config *Config, ctx context.Context, dest xnet.Dest
 			ecdhe = uConn.HandshakeState.State13.KeyShareKeys.MlkemEcdhe
 		}
 		if ecdhe == nil {
-			return nil, errors.New("PHANTOM: fingerprint ", uConn.ClientHelloID.Client, uConn.ClientHelloID.Version, " does not support TLS 1.3")
+			return nil, errors.New("PHANTOM: fingerprint ", uConn.ClientHelloID.Client,
+				uConn.ClientHelloID.Version, " does not support TLS 1.3")
 		}
 		uConn.AuthKey, _ = ecdhe.ECDH(publicKey)
 		if uConn.AuthKey == nil {
 			return nil, errors.New("PHANTOM: ECDH shared key is nil")
 		}
-
-		// Derive the auth key with the Phantom HKDF label so that auth keys
-		// from REALITY and PHANTOM configurations never collide.
 		if _, err := hkdf.New(sha256.New, uConn.AuthKey, hello.Random[:20],
 			[]byte(phantomHKDFLabel)).Read(uConn.AuthKey); err != nil {
 			return nil, err
@@ -231,57 +225,199 @@ func UClient(conn xnet.Conn, config *Config, ctx context.Context, dest xnet.Dest
 
 	if !uConn.Verified {
 		errors.LogError(ctx, "PHANTOM: received real certificate (potential MITM or redirection)")
-		// Mimic real browser traffic on the fallback connection so the session
-		// looks legitimate to an observer.
-		go phantomSpider(uConn)
-		// Brief random delay before returning the error so the connection
-		// cannot be timed to distinguish it from a real browser session.
-		time.Sleep(time.Duration(randBetween(100, 600)) * time.Millisecond)
+		// Mimic authentic browser activity so the TCP session is
+		// indistinguishable from a real user visiting the fallback site.
+		go phantomSpider(uConn, config)
+		returnDelay := crypto.RandBetween(spiderY(config, 8), spiderY(config, 9))
+		if returnDelay == 0 {
+			returnDelay = crypto.RandBetween(100, 600)
+		}
+		time.Sleep(time.Duration(returnDelay) * time.Millisecond)
 		return nil, errors.New("PHANTOM: processed invalid connection").AtWarning()
 	}
 
 	return uConn, nil
 }
 
-// phantomSpider performs a minimal HTTP GET on the fallback server to make
-// the TCP session look like legitimate browser activity.
-func phantomSpider(uConn *UConn) {
+// spiderY returns config.SpiderY[idx] when available, otherwise 0.
+func spiderY(config *Config, idx int) int64 {
+	if int(idx) < len(config.SpiderY) {
+		return config.SpiderY[idx]
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// Spider — realistic multi-page browser simulation
+// ---------------------------------------------------------------------------
+
+var (
+	href = []byte(`href="`)
+	dot  = []byte(".")
+)
+
+// phantomPaths tracks per-hostname sets of discovered URLs, shared across
+// connections so subsequent spiders can crawl a wider surface area.
+var phantomPaths struct {
+	sync.Mutex
+	m map[string]map[string]struct{}
+}
+
+func getPhantomPathLocked(paths map[string]struct{}) string {
+	stopAt := int(crypto.RandBetween(0, int64(len(paths)-1)))
+	i := 0
+	for s := range paths {
+		if i == stopAt {
+			return s
+		}
+		i++
+	}
+	return "/"
+}
+
+// extractHrefs scans body for href="/..." or href="http..." paths and adds
+// them to paths (stripping the scheme+host prefix when present).
+func extractHrefs(body []byte, serverName string, paths map[string]struct{}) {
+	prefix := append([]byte("https://"), serverName...)
+	remaining := body
+	for {
+		idx := bytes.Index(remaining, href)
+		if idx < 0 {
+			break
+		}
+		remaining = remaining[idx+len(href):]
+		end := bytes.IndexByte(remaining, '"')
+		if end < 0 {
+			break
+		}
+		link := remaining[:end]
+		remaining = remaining[end+1:]
+		link = bytes.TrimPrefix(link, prefix)
+		if len(link) == 0 || link[0] != '/' {
+			continue
+		}
+		if !bytes.Contains(link, dot) {
+			paths[string(link)] = struct{}{}
+		}
+	}
+}
+
+// phantomSpider simulates realistic browser browsing on the fallback site.
+// It mirrors REALITY's spider in quality: multiple concurrent sub-requests,
+// cookie padding, timing intervals, and link following.
+func phantomSpider(uConn *UConn, config *Config) {
 	client := &http.Client{
 		Transport: &http2.Transport{
 			DialTLSContext: func(ctx context.Context, network, addr string, _ *gotls.Config) (xnet.Conn, error) {
+				if config.Show {
+					fmt.Printf("PHANTOM localAddr: %v\tspider DialTLSContext\n", uConn.LocalAddr())
+				}
 				return uConn, nil
 			},
 		},
 	}
-	req, err := http.NewRequest("GET", "https://"+uConn.ServerName+"/", nil)
-	if err != nil {
-		return
-	}
-	req.Header.Set("User-Agent",
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "+
-			"(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	resp, err := client.Do(req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-	// Drain a limited amount of the body to look more realistic.
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 32*1024))
-}
 
-// randBetween returns a random int64 in [lo, hi].
-func randBetween(lo, hi int64) int64 {
-	if hi <= lo {
-		return lo
+	prefix := "https://" + uConn.ServerName
+
+	// Initialise the per-hostname path set.
+	phantomPaths.Lock()
+	if phantomPaths.m == nil {
+		phantomPaths.m = make(map[string]map[string]struct{})
 	}
-	n := hi - lo + 1
-	var buf [8]byte
-	rand.Read(buf[:])
-	v := int64(binary.BigEndian.Uint64(buf[:]))
-	if v < 0 {
-		v = -v
+	paths := phantomPaths.m[uConn.ServerName]
+	if paths == nil {
+		spiderX := config.SpiderX
+		if spiderX == "" {
+			spiderX = "/"
+		}
+		paths = map[string]struct{}{spiderX: {}}
+		phantomPaths.m[uConn.ServerName] = paths
 	}
-	return lo + v%n
+	firstURL := prefix + getPhantomPathLocked(paths)
+	phantomPaths.Unlock()
+
+	localAddr := uConn.LocalAddr().String()
+
+	get := func(first bool) {
+		var (
+			req  *http.Request
+			resp *http.Response
+			err  error
+			body []byte
+		)
+		if first {
+			req, _ = http.NewRequest("GET", firstURL, nil)
+		} else {
+			phantomPaths.Lock()
+			req, _ = http.NewRequest("GET", prefix+getPhantomPathLocked(paths), nil)
+			phantomPaths.Unlock()
+		}
+		if req == nil {
+			return
+		}
+		// Set realistic browser headers (Accept, Accept-Language, User-Agent, etc.)
+		utils.TryDefaultHeadersWith(req.Header, "nav")
+		if first && config.Show {
+			fmt.Printf("PHANTOM localAddr: %v\tspider req.UserAgent(): %v\n", localAddr, req.UserAgent())
+		}
+
+		times := 1
+		if !first {
+			times = int(crypto.RandBetween(spiderY(config, 4), spiderY(config, 5)))
+			if times <= 0 {
+				times = 1
+			}
+		}
+
+		for j := 0; j < times; j++ {
+			if !first && j == 0 {
+				req.Header.Set("Referer", firstURL)
+			}
+			// Cookie padding: add a variable-length cookie to vary TLS record sizes.
+			padLen := crypto.RandBetween(spiderY(config, 0), spiderY(config, 1))
+			if padLen > 0 {
+				pad := make([]byte, padLen)
+				for i := range pad {
+					pad[i] = '0'
+				}
+				req.AddCookie(&http.Cookie{Name: "padding", Value: string(pad)})
+			}
+
+			if resp, err = client.Do(req); err != nil {
+				break
+			}
+			defer resp.Body.Close()
+			req.Header.Set("Referer", req.URL.String())
+
+			if body, err = io.ReadAll(resp.Body); err != nil {
+				break
+			}
+
+			// Harvest links for subsequent requests.
+			phantomPaths.Lock()
+			extractHrefs(body, uConn.ServerName, paths)
+			req.URL.Path = getPhantomPathLocked(paths)
+			if config.Show {
+				fmt.Printf("PHANTOM localAddr: %v\tspider Referer: %v\tlen(body): %v\tlen(paths): %v\n",
+					localAddr, req.Referer(), len(body), len(paths))
+			}
+			phantomPaths.Unlock()
+
+			if !first {
+				interval := crypto.RandBetween(spiderY(config, 6), spiderY(config, 7))
+				if interval > 0 {
+					time.Sleep(time.Duration(interval) * time.Millisecond)
+				}
+			}
+		}
+	}
+
+	get(true)
+
+	concurrency := int(crypto.RandBetween(spiderY(config, 2), spiderY(config, 3)))
+	for i := 0; i < concurrency; i++ {
+		go get(false)
+	}
+	// Do not close the connection — let it time out naturally so the session
+	// duration matches that of a real browser.
 }
