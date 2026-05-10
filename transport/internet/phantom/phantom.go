@@ -24,7 +24,6 @@ import (
 	"io"
 	"net/http"
 	"reflect"
-	"strings"
 	"time"
 	"unsafe"
 
@@ -216,7 +215,7 @@ func UClient(conn xnet.Conn, config *Config, ctx context.Context, dest xnet.Dest
 
 		aead := crypto.NewAesGcm(uConn.AuthKey)
 		if config.Show {
-			fmt.Printf("PHANTOM localAddr: %v\tuConn.AuthKey[:16]: %v\tAEAD: %T\n", localAddr, uConn.AuthKey[:16], aead)
+			fmt.Printf("PHANTOM localAddr: %v\tuConn.AuthKey[:4]: %v\tAEAD: %T\n", localAddr, uConn.AuthKey[:4], aead)
 		}
 		aead.Seal(hello.SessionId[:0], hello.Random[20:], hello.SessionId[:16], hello.Raw)
 		copy(hello.Raw[39:], hello.SessionId)
@@ -286,11 +285,3 @@ func randBetween(lo, hi int64) int64 {
 	}
 	return lo + v%n
 }
-
-// stripWWW removes the leading "www." from a hostname for display purposes.
-func stripWWW(sn string) string {
-	return strings.TrimPrefix(sn, "www.")
-}
-
-// _ suppresses "declared and not used" for helpers that may be used later.
-var _ = stripWWW

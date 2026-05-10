@@ -144,7 +144,7 @@ Phantom uses the same handshake authentication mechanism as REALITY:
 
 1. The client computes an **ECDH shared secret** using the server's X25519 public
    key and the ephemeral key in the TLS ClientHello.
-2. The shared secret is fed through **HKDF-SHA256** with the label `"PHANTOM"` to
+2. The shared secret is fed through **HKDF-SHA256** with the label `"REALITY"` to
    produce an *auth key*.
 3. The client encrypts the first 16 bytes of the TLS session ID with AES-GCM
    keyed by the auth key.
@@ -235,8 +235,8 @@ Phantom and REALITY share the same core handshake design.  The differences are:
 
 1. **Password vs key pair**: Phantom lets you use a password; REALITY requires
    manual key generation.
-2. **HKDF label**: `"PHANTOM"` vs `"REALITY"` — the two protocols are
-   cryptographically distinct even on the same server/port.
+2. **HKDF label**: Both use `"REALITY"` (required for server-library compatibility).
+   Protocol differentiation comes from password-derived keys and traffic padding.
 3. **Default fingerprint**: Phantom defaults to `chrome`; REALITY requires
    explicit configuration.
 4. **Traffic padding**: Phantom supports optional random padding in the session

@@ -86,7 +86,7 @@ func ListenTCP(ctx context.Context, address net.Address, port net.Port, streamSe
 	if config := phantom.ConfigFromStreamSettings(streamSettings); config != nil {
 		var err error
 		l.phantomConfig = config
-		// Pre-build the reality config (performs password key derivation once).
+		// Pre-build the REALITY config (performs password key derivation once).
 		l.realityConfig, err = config.GetREALITYConfig()
 		if err != nil {
 			return nil, errors.New("PHANTOM: failed to build config").Base(err)
